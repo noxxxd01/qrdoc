@@ -327,11 +327,17 @@ class PDFViewer(QMainWindow):
     def render_current_page(self):
         if not self.doc:
             self.page_label.setText("No document loaded")
+            self.lbl_page_info.setText("Page: 0 / 0")
             return
+         
         page = self.doc.load_page(self.current_page_index)
         pix = pixmap_from_fitz_page(page, zoom=self.zoom)
         self.page_label.setPixmap(pix)
         self.page_label.resize(pix.width(), pix.height())
+
+        # Update page info
+        self.lbl_page_info.setText(f"Page: {self.current_page_index + 1} / {self.doc.page_count}")
+
         if self.page_label.selection != self.selection:
             self.page_label.selection = self.selection
             self.page_label.update()
