@@ -9,7 +9,7 @@ Installation Instructions:
     - Open Command Prompt inside qrdoc folder. Type: "pip install -r requirements.txt"
 
 3. Run the application:
-    - Open Command Prompt inside qrdoc folder. Type: "python pdf_viewer.py"
+    - Open Command Prompt inside qrdoc folder. Type: "python qrdoc.py"
 
 
 
