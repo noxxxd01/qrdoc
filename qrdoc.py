@@ -102,82 +102,120 @@ class SelectableLabel(QLabel):
         self._start = None
         self._end = None
         self.selection = None
+        self._dragging = False
+        self._drag_offset = (0, 0)
 
     def mousePressEvent(self, event):
         if not self.pixmap():
             return
         if event.button() == Qt.LeftButton:
-            self._start = event.pos()
-            self._end = self._start
+            if self.selection and self._point_in_selection(event.pos()):
+                # Start dragging
+                self._dragging = True
+                nx, ny, nw, nh = self.selection
+                pw, ph = self.pixmap().width(), self.pixmap().height()
+                x = int(nx * pw)
+                y = int(ny * ph)
+                self._drag_offset = (event.pos().x() - x, event.pos().y() - y)
+            else:
+                # Start drawing new rectangle
+                self._start = event.pos()
+                self._end = self._start
+                self.selection = None
             self.update()
 
     def mouseMoveEvent(self, event):
-        if self._start is not None:
+        if self._dragging:
+            # Move the selection
+            nx, ny, nw, nh = self.selection
+            pw, ph = self.pixmap().width(), self.pixmap().height()
+            w, h = int(nw * pw), int(nh * ph)
+            new_x = event.pos().x() - self._drag_offset[0]
+            new_y = event.pos().y() - self._drag_offset[1]
+
+            # clamp to pixmap boundaries
+            new_x = max(0, min(new_x, pw - w))
+            new_y = max(0, min(new_y, ph - h))
+
+            self.selection = (new_x / pw, new_y / ph, nw, nh)
+            self.update()
+
+        elif self._start is not None:
             self._end = event.pos()
             self.update()
 
     def mouseReleaseEvent(self, event):
-        if not self.pixmap():
-            return
-        if event.button() == Qt.LeftButton and self._start is not None:
+        if self._dragging:
+            self._dragging = False
+            self.update()
+        elif self._start is not None:
             self._end = event.pos()
             self._finalize_selection()
             self._start = None
             self._end = None
             self.update()
 
-    def _finalize_selection(self):
-        pix = self.pixmap()
-        if not pix:
-            return
-        pw = pix.width()
-        ph = pix.height()
+    def _point_in_selection(self, point):
+        if self.selection is None:
+            return False
+        nx, ny, nw, nh = self.selection
+        pw, ph = self.pixmap().width(), self.pixmap().height()
+        x = int(nx * pw)
+        y = int(ny * ph)
+        w = int(nw * pw)
+        h = int(nh * ph)
+        return x <= point.x() <= x + w and y <= point.y() <= y + h
 
+    def _finalize_selection(self):
+        if self._start is None or self._end is None or not self.pixmap():
+            self.selection = None
+            return
+
+        pw, ph = self.pixmap().width(), self.pixmap().height()
         x1 = max(0, min(self._start.x(), self._end.x()))
         y1 = max(0, min(self._start.y(), self._end.y()))
         x2 = max(0, max(self._start.x(), self._end.x()))
         y2 = max(0, max(self._start.y(), self._end.y()))
 
-        x1 = max(0, min(x1, pw))
-        x2 = max(0, min(x2, pw))
-        y1 = max(0, min(y1, ph))
-        y2 = max(0, min(y2, ph))
-
-        w = x2 - x1
-        h = y2 - y1
-        if w <= 2 or h <= 2:
+        # enforce square selection
+        size = min(x2 - x1, y2 - y1)
+        if size <= 2:
             self.selection = None
             return
 
-        nx = x1 / float(pw)
-        ny = y1 / float(ph)
-        nw = w / float(pw)
-        nh = h / float(ph)
-        self.selection = (nx, ny, nw, nh)
-
+        self.selection = (x1 / pw, y1 / ph, size / pw, size / ph)
+    
     def paintEvent(self, event):
         super().paintEvent(event)
-        if self._start is not None and self._end is not None:
-            painter = QPainter(self)
-            pen = QPen(Qt.red)
-            pen.setWidth(2)
+
+        if not self.pixmap():
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # Draw currently drawn rectangle
+        if self._start and self._end:
+            pen = QPen(Qt.red, 2, Qt.SolidLine)
             painter.setPen(pen)
+            brush = Qt.transparent
+            painter.setBrush(brush)
             rect = QRect(self._start, self._end)
             painter.drawRect(rect.normalized())
-        elif self.selection is not None and self.pixmap():
-            pix = self.pixmap()
-            pw = pix.width()
-            ph = pix.height()
+
+        # Draw finalized selection
+        if self.selection:
             nx, ny, nw, nh = self.selection
+            pw, ph = self.pixmap().width(), self.pixmap().height()
             x = int(nx * pw)
             y = int(ny * ph)
             w = int(nw * pw)
             h = int(nh * ph)
-            painter = QPainter(self)
-            pen = QPen(Qt.green)
-            pen.setWidth(2)
+            pen = QPen(Qt.green, 2, Qt.SolidLine)
             painter.setPen(pen)
+            painter.setBrush(Qt.transparent)
             painter.drawRect(x, y, w, h)
+
 
 
 class PDFViewer(QMainWindow):
@@ -510,6 +548,7 @@ class PDFViewer(QMainWindow):
         pdlg.show()
 
         try:
+            border_ratio = 0.05
             for i in range(count):
                 if pdlg.wasCanceled():
                     QMessageBox.information(self, "Cancelled", "Export cancelled by user.")
@@ -527,6 +566,14 @@ class PDFViewer(QMainWindow):
                 h = nh * ph
                 x1 = x0 + w
                 y1 = y0 + h
+
+                # Apply border
+                border_x = w * border_ratio
+                border_y = h * border_ratio
+                x0 += border_x
+                y0 += border_y
+                x1 -= border_x
+                y1 -= border_y
 
                 qr_img = self.qr_images[i]
                 buf = io.BytesIO()
