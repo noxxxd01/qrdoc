@@ -22,6 +22,7 @@ Usage:
 
 import sys
 import io
+import os
 from functools import partial
 
 from PyQt5.QtWidgets import (
@@ -43,6 +44,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtGui import QPixmap, QImage, QPainter, QPen
 from PyQt5.QtCore import Qt, QRect, QThread, pyqtSignal
+from PyQt5.QtWidgets import QDialog, QVBoxLayout, QLabel, QTextEdit, QPushButton, QHBoxLayout
 
 import fitz  # PyMuPDF
 from PIL import Image
@@ -59,6 +61,42 @@ def pixmap_from_fitz_page(page, zoom=1.0):
     qt_pix = QPixmap()
     qt_pix.loadFromData(buf.getvalue(), format=b"PNG")
     return qt_pix
+
+class FilenamesDialog(QDialog):
+    def __init__(self, num_pages, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Enter filenames for each page")
+        self.resize(400, 300)
+        self.num_pages = num_pages
+        self.result_filenames = None
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"Enter {num_pages} filenames (one per line, in page order):"))
+
+        self.text_edit = QTextEdit()
+        # prefill with default page names
+        default_names = [f"page_{i+1}.pdf" for i in range(num_pages)]
+        self.text_edit.setPlainText("\n".join(default_names))
+        layout.addWidget(self.text_edit)
+
+        buttons_layout = QHBoxLayout()
+        btn_ok = QPushButton("OK")
+        btn_cancel = QPushButton("Cancel")
+        buttons_layout.addWidget(btn_ok)
+        buttons_layout.addWidget(btn_cancel)
+        layout.addLayout(buttons_layout)
+
+        btn_ok.clicked.connect(self.accept_dialog)
+        btn_cancel.clicked.connect(self.reject)
+
+    def accept_dialog(self):
+        text = self.text_edit.toPlainText().strip()
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if len(lines) != self.num_pages:
+            QMessageBox.warning(self, "Filename mismatch", f"You must enter exactly {self.num_pages} filenames.")
+            return
+        self.result_filenames = lines
+        self.accept()
 
 
 class ThumbnailWorker(QThread):
@@ -313,6 +351,11 @@ class PDFViewer(QMainWindow):
         self.btn_export.setEnabled(False)
         dock_v.addWidget(self.btn_export)
 
+        self.btn_export_individual = QPushButton("Export Individually")
+        self.btn_export_individual.clicked.connect(self.export_individual_pdfs)
+        self.btn_export_individual.setEnabled(False)
+        dock_v.addWidget(self.btn_export_individual)
+
         dock_v.addStretch()
 
         main_h.addWidget(dock, stretch=1)
@@ -505,6 +548,7 @@ class PDFViewer(QMainWindow):
             if self.page_label.selection is not None:
                 self.selection = self.page_label.selection
                 self.btn_export.setEnabled(True)
+                self.btn_export_individual.setEnabled(True)
                 timer.stop()
 
         timer = QTimer(self)
@@ -541,11 +585,13 @@ class PDFViewer(QMainWindow):
 
         count = min(len(self.qr_images), self.doc.page_count)
 
-        # modal progress dialog with cancel
+        # Modal progress dialog with immediate show and update
         pdlg = QProgressDialog("Embedding QR codes...", "Cancel", 0, count, self)
         pdlg.setWindowModality(Qt.ApplicationModal)
         pdlg.setWindowTitle("Exporting PDF")
+        pdlg.setMinimumDuration(0)  # ensures dialog shows immediately
         pdlg.show()
+        QApplication.processEvents()  # force repaint so dialog appears
 
         try:
             border_ratio = 0.05
@@ -589,10 +635,108 @@ class PDFViewer(QMainWindow):
             self.qr_images = []
             self.page_label.update()
             self.btn_export.setEnabled(False)
-            
+
         except Exception as e:
             QMessageBox.critical(self, "Export failed", f"Failed during export:\n{e}")
 
+    # ---------------------- Export Individually ----------------------
+    def export_individual_pdfs(self):
+        if not self.doc:
+            QMessageBox.warning(self, "No PDF", "Please open a PDF first.")
+            return
+
+        if not self.selection:
+            QMessageBox.warning(self, "No QR placement", "Please draw a rectangle to place QR codes first.")
+            return
+
+        num_pages = self.doc.page_count
+
+        # Prompt user for filenames
+        dlg = FilenamesDialog(num_pages, self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        filenames = dlg.result_filenames
+
+        # Ask user for output folder
+        folder = QFileDialog.getExistingDirectory(self, "Select Output Folder")
+        if not folder:
+            return
+
+        # Get links for QR codes
+        text = self.links_text.toPlainText().strip()
+        links = [line.strip() for line in text.splitlines() if line.strip()]
+
+        # Modal progress dialog with immediate show
+        pdlg = QProgressDialog("Exporting individual PDFs...", "Cancel", 0, num_pages, self)
+        pdlg.setWindowModality(Qt.ApplicationModal)
+        pdlg.setWindowTitle("Exporting PDFs")
+        pdlg.setMinimumDuration(0)
+        pdlg.show()
+        QApplication.processEvents()
+
+        try:
+            border_ratio = 0.05
+            for i in range(num_pages):
+                if pdlg.wasCanceled():
+                    QMessageBox.information(self, "Cancelled", "Export cancelled by user.")
+                    return
+
+                filename = filenames[i]
+                if not filename.lower().endswith(".pdf"):
+                    filename += ".pdf"
+                out_path = os.path.join(folder, filename)
+
+                # Create single-page PDF
+                new_doc = fitz.open()
+                new_doc.insert_pdf(self.doc, from_page=i, to_page=i)
+
+                # Add QR code if available
+                if i < len(links):
+                    qr = qrcode.make(links[i])
+                    if qr.mode != "RGB":
+                        qr = qr.convert("RGB")
+
+                    nx, ny, nw, nh = self.selection
+                    page = new_doc.load_page(0)
+
+                    # Use original page rect for correct placement
+                    orig_page = self.doc.load_page(i)
+                    rect = orig_page.rect
+
+                    x0 = rect.x0 + nx * rect.width
+                    y0 = rect.y0 + ny * rect.height
+                    x1 = x0 + nw * rect.width
+                    y1 = y0 + nh * rect.height
+
+                    # Apply border
+                    border_x = (x1 - x0) * border_ratio
+                    border_y = (y1 - y0) * border_ratio
+                    x0 += border_x
+                    y0 += border_y
+                    x1 -= border_x
+                    y1 -= border_y
+
+                    buf = io.BytesIO()
+                    qr.save(buf, format="PNG")
+                    img_bytes = buf.getvalue()
+                    page.insert_image(fitz.Rect(x0, y0, x1, y1), stream=img_bytes)
+
+                # Save the individual PDF
+                new_doc.save(out_path)
+                new_doc.close()
+
+                pdlg.setValue(i + 1)
+
+            QMessageBox.information(self, "Done", f"Saved {num_pages} individual PDFs to:\n{folder}")
+
+            self.selection = None
+            self.page_label.selection = None
+            self.qr_images = []
+            self.page_label.update()
+            self.btn_export.setEnabled(False)
+
+        except Exception as e:
+            QMessageBox.critical(self, "Export failed", f"Failed during export:\n{e}")
 
 def main():
     app = QApplication(sys.argv)
