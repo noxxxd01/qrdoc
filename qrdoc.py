@@ -555,21 +555,18 @@ class PDFViewer(QMainWindow):
                     return
 
                 page = doc.load_page(i)
-                rect = page.rect
-                pw = rect.width
-                ph = rect.height
+                rect = page.rect  # PDF page coordinates
 
-                nx, ny, nw, nh = self.selection
-                x0 = rect.x0 + nx * pw
-                y0 = rect.y0 + ny * ph
-                w = nw * pw
-                h = nh * ph
-                x1 = x0 + w
-                y1 = y0 + h
+                # Use self.selection (normalized 0-1) to map to PDF page coordinates
+                nx, ny, nw, nh = self.selection  # <-- must be here, inside the loop
+                x0 = rect.x0 + nx * rect.width
+                y0 = rect.y0 + ny * rect.height
+                x1 = x0 + nw * rect.width
+                y1 = y0 + nh * rect.height
 
                 # Apply border
-                border_x = w * border_ratio
-                border_y = h * border_ratio
+                border_x = (x1 - x0) * border_ratio
+                border_y = (y1 - y0) * border_ratio
                 x0 += border_x
                 y0 += border_y
                 x1 -= border_x
@@ -586,6 +583,13 @@ class PDFViewer(QMainWindow):
 
             doc.save(out_path)
             QMessageBox.information(self, "Saved", f"Saved new PDF with QR codes to:\n{out_path}")
+
+            self.selection = None
+            self.page_label.selection = None
+            self.qr_images = []
+            self.page_label.update()
+            self.btn_export.setEnabled(False)
+            
         except Exception as e:
             QMessageBox.critical(self, "Export failed", f"Failed during export:\n{e}")
 
